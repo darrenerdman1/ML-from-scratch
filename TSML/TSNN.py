@@ -1,34 +1,72 @@
 import numpy as np
+from .tanh_layer import tanh
+from .relu_layer import ReLU
+from .prelu_layer import pReLU
+from .leakyrelu_layer import LeakyReLU
+from .sigmoid_layer import Sigmoid
+from .out_layer import outactivation
 
+activ_functs={}
+activ_functs['tanh']=tanh
+activ_functs['relu']=ReLU
+activ_functs['prelu']=pReLU
+activ_functs['leakyrelu']=LeakyReLU
+activ_functs['sigmoid']=Sigmoid
+activ_functs['outact']=outactivation
+
+
+def BCEC(y,p):
+    Err=[]
+    zeros=np.where(y==0)
+    ones=np.where(y==1)
+    Err=np.hstack((-y[ones]*np.log(p[ones]),-(1-y[zeros])*np.log(1-p[zeros])))
+    return np.mean(Err)
+
+def GCEC(y,p):
+    return -1*np.sum(np.multiply(y,np.log(p)))/y.shape[0]
+
+def SSE(y,y_hat):
+    return ((y_hat-y).T@(y_hat-y))/len(y)
+
+def FSSE(y,y_hat):
+    return np.trace((y_hat-y).T@(y_hat-y))/len(y)
 
 class NeuralNet:
-    def __init__(self,nodes,indims,activations,
-                  actders, cost, task='Classifcation',scaleweights=True, seed=False):
+    def __init__(self, nodes, indims, activations, cost=False, task='Classification', solver="Basic", scaleweights=True, seed=False):
         self.nodes=nodes
         self.layers=len(nodes)
         self.indims=indims
+        activations.append('outact')
         self.activations=activations
-        self.actders=actders
-        self.task=task
-        self.cost=cost
-        self.weights={}
-        self.biases={}
-        self.y_classes=[]
+        self.task=task.lower()
+        if not cost and task.lower()=='classification':
+            if nodes[-1]==1:
+                self.cost=BCEC
+            else:
+                self.cost=GCEC
+        elif not cost and task.lower()=='regression':
+            if nodes[-1]==1:
+                self.cost=SSE
+            else:
+                self.cost=FSSE
+        if task.lower() !='regression' and task.lower() !='classification':
+            print("Invalid task, use 'Regression' or 'Classification'")
+            return None
+
+        self.y_classes=np.array([])
         self.Xmins=np.array([])
         self.scaleweights=scaleweights
-        if seed !=False:
-            np.random.seed(seed)
+        self.seed=seed
+        self.solver=solver.lower()
+        self.layer_classes=[]
+        nodes=[indims]+nodes
+        for i in range(self.layers-1):
+            self.layer_classes.append(activ_functs[activations[i].lower()](nodes[i+1],nodes[i],solver=self.solver,
+                                        scaleweights=self.scaleweights,seed=self.seed))
 
-    def weightinit(self):
-        self.weights['W0']=np.random.randn(self.indims,self.nodes[0])
-        self.biases['B0']=np.random.randn(1,self.nodes[0])
-        for i in range(1,self.layers):
-            if self.scaleweights:
-                self.weights['W'+str(i)]=np.random.randn(self.nodes[i-1],self.nodes[i])*np.sqrt(1/(self.nodes[i-1]+self.nodes[i]))
-                self.biases['B'+str(i)]=np.random.randn(1,self.nodes[i])*np.sqrt(1/(self.nodes[i-1]+self.nodes[i]))
-            else:
-                self.weights['W'+str(i)]=np.random.randn(self.nodes[i-1],self.nodes[i])
-                self.biases['B'+str(i)]=np.random.randn(1,self.nodes[i])
+        self.layer_classes.append(activ_functs[activations[self.layers-1]](nodes[self.layers],nodes[self.layers-1],solver=self.solver,
+                                    scaleweights=self.scaleweights,seed=self.seed, task=self.task))
+
 
     def get_one_hot(self,targets):
         targets=np.asarray(targets).reshape(-1)
@@ -49,103 +87,146 @@ class NeuralNet:
     def unnorm(self,X,Xmin,Xmax):
         return (X)*(Xmax-Xmin)+Xmin
 
-    def predict(self, X, normalize=True):
-        self.Z={}
-        self.Zprime={}
 
-        b = np.sort(X,axis=0)
-        if not np.where((b[1:] != b[:-1]).sum(axis=0)+1<20):
-            print("At least one of your features has less than 20 unique "\
-                  +"values. Perhaps try one hot encoding.")
+    def predict(self, X, normalize=True):
 
         if not self.Xmins.size:
             self.Xmaxes=X.max(0)
             self.Xmins=X.min(0)
             X=self.norm(X,self.Xmins,self.Xmaxes)
+
         elif normalize:
             X=self.norm(X,self.Xmins,self.Xmaxes)
 
-        if not self.weights:
-            self.weightinit()
-
-        self.Z['Z0']=X
-
-        for i in range(self.layers-1):
-            self.Z['Z'+str(i+1)]=self.activations[i](self.Z['Z'+str(i)]@self.weights['W'+str(i)]+\
-                  self.biases["B"+str(i)])
-            self.Zprime['Zprime'+str(i)]=self.actders[i](self.Z['Z'+str(i)]@self.weights['W'+str(i)]+\
-                       self.biases["B"+str(i)])
-        if self.task=='Classification':
-            #Convert to array in case a matrix was passed
-            self.probabilities=np.array(self.activations[self.layers-1](self.Z['Z'+str(self.layers-1)]\
-                                        @self.weights['W'+str(self.layers-1)]+\
-                                        self.biases["B"+str(self.layers-1)]))
-            if self.nodes[-1]>1 and self.y_classes:
-                 self.predictions=model.y_classes[np.argmax(self.probabilities, axis=1)]
-            elif self.nodes[-1]>1:
-                self.predictions=np.eye(self.probabilities.shape[1])[np.argmax(self.probabilities, axis=1)]
+        A=X
+        for i in range(self.layers):
+            if self.solver=='nesterov':
+                A=self.layer_classes[i].nesterov_forwardprop(A,self.mu)
             else:
-                self.predictions=np.where(np.rint(self.probabilities)==1,self.positive_class,self.negative_class)
-        elif self.task=='Regression':
-            self.normpredictions=self.Z['Z'+str(self.layers-1)]@self.weights['W'+str(self.layers-1)]+\
-            self.biases["B"+str(self.layers-1)]
+                A=self.layer_classes[i].forwardprop(A)
 
-            self.predictions=self.unnorm(self.normpredictions,self.ymins,self.ymaxes)
+        if self.task=='classification':
+            #Convert to array in case a matrix was passed
+            self.probabilities=A
+            self.ohe_predictions=np.eye(self.probabilities.shape[1])[np.argmax(self.probabilities, axis=1)]
+
+            if self.nodes[-1]>1 and self.y_classes.size:
+                 self.predictions=self.y_classes[np.argmax(self.probabilities, axis=1)].reshape(-1,1)
+
+            elif self.nodes[-1]>1:
+                self.predictions=self.ohe_predictions
+
+            else:
+                self.bin_predictions=np.rint(self.probabilities)
+                self.predictions=np.where(self.bin_predictions==1,self.positive_class,self.negative_class).reshape(-1,1)
+
         else:
-            self.predictions="Invalid task. Must use regression or classification.Default is classification"
+            self.normpredictions=A
+            self.predictions=self.unnorm(self.normpredictions,self.ymins,self.ymaxes)
 
-    def train(self,X,y,epochs,eta,X_val=np.array([]),y_val=np.array([])):
+    def weight_initialization(self):
+        for i in range(self.layers-1,-1,-1):
+            self.layer_classes[i].weightinit()
+
+    def weight_update(self,eta,y):
+        D=y
+        if self.solver=='nesterov':
+            for i in range(self.layers-1,-1,-1):
+                D=self.layer_classes[i].nesterov_backprop(eta,self.mu,D)
+
+        elif self.solver=='basic':
+            for i in range(self.layers-1,-1,-1):
+                D=self.layer_classes[i].backprop(eta,D)
+
+        elif self.solver=='momentum':
+            for i in range(self.layers-1,-1,-1):
+                D=self.layer_classes[i].momentum_backprop(eta,self.mu,D)
+
+        elif self.solver=='adagrad':
+            for i in range(self.layers-1,-1,-1):
+                D=self.layer_classes[i].ada_backprop(eta,D)
+
+        elif self.solver=='rmsprop':
+            for i in range(self.layers-1,-1,-1):
+                D=self.layer_classes[i].RMS_prop(eta,self.gamma,D)
+
+        elif self.solver=='adam':
+            for i in range(self.layers-1,-1,-1):
+                D=self.layer_classes[i].adamoptimizer(eta,self.mu,self.gamma,self.t,D)
+
+    def train(self,X,y,epochs,eta,mu=0.1,gamma=.9,batch_size=0,error_calc=True,reinitialize=False,
+                X_val=np.array([]),y_val=np.array([])):
+        if reinitialize:
+            self.weight_initialization()
+        if batch_size==0:
+            batch_size=X.shape[0]
         self.valerror=[]
         self.error=[]
-        d={}
         self.Xmaxes=X.max(0)
         self.Xmins=X.min(0)
+        self.gamma=gamma
+        self.mu=mu
         X=self.norm(X,self.Xmins,self.Xmaxes)
+
         if X_val.size:
             X_val=self.norm(X_val,self.Xmins,self.Xmaxes)
-
-        if (self.task=="Classification" and y.shape[1]<self.nodes[-1]):
+        if (self.task=="classification" and y.shape[1]<self.nodes[-1]):
             self.y_classes=np.unique(y)
             y=self.mat_ohe(y,[0])
             if y_val.size:
                 y_val=self.mat_ohe(y_val,[0])
-        elif (self.task=="Classification" and y.shape[1]==self.nodes[-1]):
+
+        elif (self.task=="classification" and y.shape[1]==self.nodes[-1]):
             self.positive_class=np.unique(y)[1]
-            self.negative_class=np.unique(y[0])
+            self.negative_class=np.unique(y)[0]
             y=np.where(y==self.positive_class,1,0)
             if y_val.size:
                 y_val=np.where(y_val==self.positive_class,1,0)
-        elif self.task=="Regression":
+
+        elif self.task=="regression":
             self.ymaxes=y.max(0)
             self.ymins=y.min(0)
             y=self.norm(y,self.ymins,self.ymaxes)
+
             if y_val.size:
                 y_val=self.norm(y_val,self.ymins,self.ymaxes)
-        self.predict(X,False)
+
+        batches=np.ceil(X.shape[0]/batch_size).astype(int)
+        train=np.hstack((X,y))
+        np.random.shuffle(train)
+        train=np.array_split(train,batches)
+        self.t=0
         for i in range(epochs):
-            if self.task=='Classification':
-                d['d'+str(self.layers-1)]=self.probabilities-y
-            elif self.task=='Regression':
-                d['d'+str(self.layers-1)]=self.normpredictions-y
-            else:
-                return self.predictions
+            for a in train:
+                X=np.array(a[:,:-self.nodes[-1]])
+                y=np.array(a[:,-self.nodes[-1]:])
+                self.predict(X,False)
+                self.weight_update(eta,y)
 
-            for j in range(self.layers-1):
-                d['d'+str(self.layers-2-j)]=np.multiply(d['d'+str(self.layers-1-j)]                                                        @self.weights['W'+str(self.layers-1-j)].T,                                                        self.Zprime['Zprime'+str(self.layers-2-j)])
+                if error_calc and self.task=='classification':
+                    self.predict(X,False)
+                    self.error.append(self.cost(y,self.probabilities))
 
-            for j in range(self.layers):
-                self.weights['W'+str(j)]=self.weights['W'+str(j)]-eta*self.Z['Z'+str(j)].T@d['d'+str(j)]
-                self.biases['B'+str(j)]=self.biases['B'+str(j)]-eta*np.sum(d['d'+str(j)], axis=0)
+                elif error_calc:
+                    self.predict(X,False)
+                    self.error.append(self.cost(y,self.normpredictions))
+                self.t += 1
 
-            if self.task=='Classification':
+            if self.task=='classification':
+                if self.nodes[-1]>1:
+                    acc=(self.ohe_predictions==y).mean()
+
+                elif self.nodes[-1]==1:
+                    acc=(self.bin_predictions==y).mean()
+
+                if acc== 1.0:
+                    break
+
                 if y_val.size:
                     self.predict(X_val,False)
                     self.valerror.append(self.cost(y_val,self.probabilities))
-                self.predict(X,False)
-                self.error.append(self.cost(y,self.probabilities))
+
             else:
                 if y_val.size:
                     self.predict(X_val,False)
                     self.valerror.append(self.cost(y_val,self.normpredictions))
-                self.predict(X,False)
-                self.error.append(self.cost(y,self.normpredictions))
