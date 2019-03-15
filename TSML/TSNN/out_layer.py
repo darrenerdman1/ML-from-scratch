@@ -1,15 +1,16 @@
 import numpy as np
 
 class outactivation:
-    def __init__(self,nodes,indims,solver="Basic",scaleweights=True, seed=False, task="Classifcation"):
+    def __init__(self,nodes,indims,solver="Basic", seed=False, task="Classifcation"):
         self.solver=solver.lower()
         self.nodes=nodes
         self.indims=indims
-        self.scaleweights=scaleweights
         self.seed=seed
         self.weights=np.array([])
         self.biases=np.array([])
         self.task=task.lower()
+        self.momentum_solvers=['momentum','nesterov','nesterovrms','nesterovada','momentumada','momentumrms']
+        self.eta_solvers=["adagrad","rmsprop",'nesterovrms','nesterovada','momentumada','momentumrms']
 
     def softmax(self,Z):
         p=np.exp(Z)
@@ -18,20 +19,21 @@ class outactivation:
     def sigmoid(self,Z):
         return 1/(1+np.exp(-Z))
 
-    def weightinit(self):
-        if self.scaleweights:
-            self.weights=np.random.randn(self.indims,self.nodes)*np.sqrt(2/(self.indims+self.nodes))
-            self.biases=np.random.randn(1,self.nodes)*np.sqrt(2/(self.indims+self.nodes))
-        else:
-            self.weights=np.random.randn(self.indims,self.nodes)
-            self.biases=np.random.randn(1,self.nodes)
-        if self.solver=="momentum" or self.solver=="nesterov":
+    def weightinit(self,seed=False):
+        if seed!=False:
+            np.random.seed(seed)
+        self.weights=np.random.randn(self.indims,self.nodes)*np.sqrt(2/(self.indims+self.nodes))
+        self.biases=np.random.randn(1,self.nodes)*np.sqrt(2/(self.indims+self.nodes))
+
+        if self.solver in self.momentum_solvers:
             self.delw=np.zeros((self.indims,self.nodes))
             self.delb=np.zeros((1,self.nodes))
-        elif self.solver == "adagrad" or self.solver=="rmsprop":
+
+        if self.solver in self.eta_solvers:
             self.Gw=np.ones((self.indims,self.nodes))
             self.Gb=np.ones((1,self.nodes))
-        elif self.solver=='adam':
+
+        if self.solver=='adam':
             self.mw=np.zeros((self.indims,self.nodes))
             self.mb=np.zeros((1,self.nodes))
             self.vw=np.zeros((self.indims,self.nodes))
@@ -50,23 +52,38 @@ class outactivation:
             self.Z=self.H
         return self.Z
 
-    def backprop(self,eta, y):
+    def forwardprop_dropout(self, A,p):
+        self.M=np.random.rand(*A.shape)<p
+        self.A=A*self.M/p
+        if not self.weights.size:
+            self.weightinit()
+        self.H=self.A@self.weights+self.biases
+        if self.task=="classification" and self.nodes>1:
+            self.Z=self.softmax(self.H)
+        elif self.task=="classification" and self.nodes==1:
+            self.Z=self.sigmoid(self.H)
+        else:
+            self.Z=self.H
+        return self.Z
+
+
+    def backprop(self,eta, y,lam1,lam2):
         derivterm=self.Z-y
         D=derivterm@self.weights.T
-        self.weights-=eta*(self.A.T@(derivterm))
-        self.biases-=eta*np.sum(derivterm, axis=0)
+        self.weights-=eta*(self.A.T@(derivterm)+lam1*np.sign(self.weights)+lam2*self.weights)
+        self.biases-=eta*(np.sum(derivterm, axis=0)+lam1*np.sign(self.biases)+lam2*self.biases)
         return D
 
-    def momentum_backprop(self,eta, mu,y):
+    def momentum_backprop(self,eta, mu,y,lam1,lam2):
         derivterm=self.Z-y
         D=derivterm@self.weights.T
-        self.delw=mu*self.delw-eta*(self.A.T@(derivterm))
-        self.delb=mu*self.delb-eta*np.sum(derivterm, axis=0)
+        self.delw=mu*self.delw-eta*(self.A.T@(derivterm)+lam1*np.sign(self.weights)+lam2*self.weights)
+        self.delb=mu*self.delb-eta*(np.sum(derivterm, axis=0)+lam1*np.sign(self.biases)+lam2*self.biases)
         self.weights+=self.delw
         self.biases+=self.delb
         return D
 
-    def nesterov_forwardprop(self, A,mu=.1):
+    def nesterov_forwardprop(self, A,mu):
         self.A=A
         if not self.weights.size:
             self.weightinit()
@@ -81,48 +98,133 @@ class outactivation:
             self.Z=self.H
         return self.Z
 
-    def nesterov_backprop(self,eta, mu,y):
+    def nesterov_forwardprop_dropout(self, A,mu,p):
+        if not self.M.size:
+            self.M=np.random.rand(*A.shape)<p
+        self.A=A*self.M/p
+        if not self.weights.size:
+            self.weightinit()
+        self.weights+=mu*self.delw
+        self.biases+=mu*self.delb
+        self.H=self.A@self.weights+self.biases
+        if self.task=="classification" and self.nodes>1:
+            self.Z=self.softmax(self.H)
+        elif self.task=="classification" and self.nodes==1:
+            self.Z=self.sigmoid(self.H)
+        else:
+            self.Z=self.H
+        return self.Z
+
+
+    def nesterov_backprop(self,eta, mu,y,lam1,lam2):
         derivterm=self.Z-y
         D=derivterm@self.weights.T
+        dw=self.delw
+        db=self.delb
+        self.delw=mu*self.delw-eta*(self.A.T@(derivterm)+lam1*np.sign(self.weights)+lam2*self.weights)
+        self.delb=mu*self.delb-eta*(np.sum(derivterm, axis=0)+lam1*np.sign(self.biases)+lam2*self.biases)
         self.weights-=mu*self.delw
         self.biases-=mu*self.delb
-        self.delw=mu*self.delw-eta*(self.A.T@(derivterm))
-        self.delb=mu*self.delb-eta*np.sum(derivterm, axis=0)
-        self.weights+=self.delw
-        self.biases+=self.delb
+        self.weights+=dw
+        self.biases+=db
         return D
 
-    def ada_backprop(self,eta,y):
+    def ada_backprop(self,eta,y,nesterov,lam1,lam2):
         derivterm=self.Z-y
         D=derivterm@self.weights.T
-        self.Gw=self.Gw+(self.A.T@(derivterm))**2
-        self.Gb=self.Gb+(np.sum(derivterm, axis=0))**2
-        ada_etaw=eta/np.sqrt(self.Gw+1e-9)
-        ada_etab=eta/np.sqrt(self.Gb+1e-9)
-        self.weights-=ada_etaw*(self.A.T@(derivterm))
-        self.biases-=ada_etab*np.sum(derivterm, axis=0)
+        self.Gw=self.Gw+(self.A.T@(derivterm)+lam1*np.sign(self.weights)+lam2*self.weights)**2
+        self.Gb=self.Gb+(np.sum(derivterm, axis=0)+lam1*np.sign(self.biases)+lam2*self.biases)**2
+
+        if not nesterov:
+            ada_etaw=eta/np.sqrt(self.Gw+1e-9)
+            ada_etab=eta/np.sqrt(self.Gb+1e-9)
+            self.weights-=ada_etaw*(self.A.T@(derivterm)+lam1*np.sign(self.weights)+lam2*self.weights)
+            self.biases-=ada_etab*(np.sum(derivterm, axis=0)+lam1*np.sign(self.biases)+lam2*self.biases)
         return D
 
-    def RMS_prop(self,eta,gamma,y):
+
+    def RMS_prop(self,eta,gamma,y,nesterov,lam1,lam2):
         derivterm=self.Z-y
         D=derivterm@self.weights.T
-        self.Gw=gamma*self.Gw+(1-gamma)*(self.A.T@(derivterm))**2
-        self.Gb=gamma*self.Gb+(1-gamma)*(np.sum(derivterm, axis=0))**2
-        rms_etaw=eta/np.sqrt(self.Gw+1e-9)
-        rms_etab=eta/np.sqrt(self.Gb+1e-9)
-        self.weights-=rms_etaw*(self.A.T@(derivterm))
-        self.biases-=rms_etab*np.sum(derivterm, axis=0)
+        self.Gw=gamma*self.Gw+(1-gamma)*(self.A.T@(derivterm)+lam1*np.sign(self.weights)+lam2*self.weights)**2
+        self.Gb=gamma*self.Gb+(1-gamma)*(np.sum(derivterm, axis=0)+lam1*np.sign(self.biases)+lam2*self.biases)**2
+
+        if not nesterov:
+            rms_etaw=eta/np.sqrt(self.Gw+1e-9)
+            rms_etab=eta/np.sqrt(self.Gb+1e-9)
+            self.weights-=rms_etaw*(self.A.T@(derivterm)+lam1*np.sign(self.weights)+lam2*self.weights)
+            self.biases-=rms_etab*(np.sum(derivterm, axis=0)+lam1*np.sign(self.biases)+lam2*self.biases)
         return D
 
-    def adamoptimizer(self,eta,mu,gamma,t,y):
+    def adamoptimizer(self,eta,mu,gamma,t,y,lam1,lam2):
         derivterm=self.Z-y
         D=derivterm@self.weights.T
-        self.mw=(mu*self.mw+(1-mu)*(self.A.T@(derivterm)))/(1+mu**t)
-        self.mb=(mu*self.mb+(1-mu)*(np.sum(derivterm, axis=0)))/(1+mu**t)
-        self.vw=(gamma*self.vw+(1-gamma)*(self.A.T@(derivterm))**2)/(1+gamma**t)
-        self.vb=(gamma*self.vb+(1-gamma)*(np.sum(derivterm, axis=0))**2)/(1+gamma**t)
+        self.mw=(mu*self.mw+(1-mu)*(self.A.T@(derivterm)+lam1*np.sign(self.weights)+lam2*self.weights))/(1+mu**t)
+        self.mb=(mu*self.mb+(1-mu)*(np.sum(derivterm, axis=0)+lam1*np.sign(self.biases)+lam2*self.biases))/(1+mu**t)
+        self.vw=(gamma*self.vw+(1-gamma)*(self.A.T@(derivterm)+lam1*np.sign(self.weights)+lam2*self.weights)**2)/(1+gamma**t)
+        self.vb=(gamma*self.vb+(1-gamma)*(np.sum(derivterm, axis=0)+lam1*np.sign(self.biases)+lam2*self.biases)**2)/(1+gamma**t)
         adam_etaw=eta/np.sqrt(self.vw+1e-9)
         adam_etab=eta/np.sqrt(self.vb+1e-9)
         self.weights-=adam_etaw*self.mw
         self.biases-=adam_etab*self.mb
+        return D
+
+    def momentum_RMS_prop(self,eta,mu,gamma,y,lam1,lam2):
+        derivterm=self.Z-y
+        D=derivterm@self.weights.T
+        self.Gw=(gamma*self.Gw+(1-gamma)*(self.A.T@(derivterm)+lam1*np.sign(self.weights)+lam2*self.weights)**2)
+        self.Gb=(gamma*self.Gb+(1-gamma)*(np.sum(derivterm, axis=0)+lam1*np.sign(self.biases)+lam2*self.biases)**2)
+        rms_etaw=eta/np.sqrt(self.Gw+1e-9)
+        rms_etab=eta/np.sqrt(self.Gb+1e-9)
+        dw=self.delw
+        db=self.delb
+        self.delw=mu*self.delw-rms_etaw*(self.A.T@(derivterm)+lam1*np.sign(self.weights)+lam2*self.weights)
+        self.delb=mu*self.delb-rms_etab*(np.sum(derivterm, axis=0)+lam1*np.sign(self.biases)+lam2*self.biases)
+        self.weights+=dw
+        self.biases+=db
+        return D
+
+    def momentum_ada_backprop(self,eta,mu,y,lam1,lam2):
+        derivterm=self.Z-y
+        D=derivterm@self.weights.T
+        self.Gw=(self.Gw+(self.A.T@(derivterm)+lam1*np.sign(self.weights)+lam2*self.weights)**2)
+        self.Gb=(self.Gb+(np.sum(derivterm, axis=0))**2)
+        ada_etaw=eta/np.sqrt(self.Gw+1e-9)
+        ada_etab=eta/np.sqrt(self.Gb+1e-9)
+        dw=self.delw
+        db=self.delb
+        self.delw=mu*self.delw-ada_etaw*(self.A.T@(derivterm)+lam1*np.sign(self.weights)+lam2*self.weights)
+        self.delb=mu*self.delb-ada_etab*(np.sum(derivterm, axis=0)+lam1*np.sign(self.biases)+lam2*self.biases)
+        self.weights+=dw
+        self.biases+=db
+        return D
+
+    def nesterov_RMS_prop(self,eta,mu,y,lam1,lam2):
+        derivterm=self.Z-y
+        D=derivterm@self.weights.T
+        rms_etaw=eta/np.sqrt(self.Gw+1e-9)
+        rms_etab=eta/np.sqrt(self.Gb+1e-9)
+        dw=self.delw
+        db=self.delb
+        self.delw=mu*self.delw-rms_etaw*(self.A.T@(derivterm)+lam1*np.sign(self.weights)+lam2*self.weights)
+        self.delb=mu*self.delb-rms_etab*(np.sum(derivterm, axis=0)+lam1*np.sign(self.biases)+lam2*self.biases)
+        self.weights-=mu*dw
+        self.biases-=mu*db
+        self.weights+=self.delw
+        self.biases+=self.delb
+        return D
+
+    def nesterov_ada_backprop(self,eta,mu,y,lam1,lam2):
+        derivterm=self.Z-y
+        D=derivterm@self.weights.T
+        ada_etaw=eta/np.sqrt(self.Gw+1e-9)
+        ada_etab=eta/np.sqrt(self.Gb+1e-9)
+        dw=self.delw
+        db=self.delb
+        self.delw=mu*self.delw-ada_etaw*(self.A.T@(derivterm)+lam1*np.sign(self.weights)+lam2*self.weights)
+        self.delb=mu*self.delb-ada_etab*(np.sum(derivterm, axis=0)+lam1*np.sign(self.biases)+lam2*self.biases)
+        self.weights-=mu*dw
+        self.biases-=mu*db
+        self.weights+=self.delw
+        self.biases+=self.delb
         return D

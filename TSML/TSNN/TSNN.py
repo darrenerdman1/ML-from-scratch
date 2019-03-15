@@ -5,6 +5,7 @@ from .prelu_layer import pReLU
 from .leakyrelu_layer import LeakyReLU
 from .sigmoid_layer import Sigmoid
 from .out_layer import outactivation
+from TSML.TSPreprocessandCost import *
 
 activ_functs={}
 activ_functs['tanh']=tanh
@@ -14,31 +15,15 @@ activ_functs['leakyrelu']=LeakyReLU
 activ_functs['sigmoid']=Sigmoid
 activ_functs['outact']=outactivation
 
-
-def BCEC(y,p):
-    Err=[]
-    zeros=np.where(y==0)
-    ones=np.where(y==1)
-    Err=np.hstack((-y[ones]*np.log(p[ones]),-(1-y[zeros])*np.log(1-p[zeros])))
-    return np.mean(Err)
-
-def GCEC(y,p):
-    return -1*np.sum(np.multiply(y,np.log(p)))/y.shape[0]
-
-def SSE(y,y_hat):
-    return ((y_hat-y).T@(y_hat-y))/len(y)
-
-def FSSE(y,y_hat):
-    return np.trace((y_hat-y).T@(y_hat-y))/len(y)
-
 class NeuralNet:
-    def __init__(self, nodes, indims, activations, cost=False, task='Classification', solver="Basic", scaleweights=True, seed=False):
+    def __init__(self, nodes, indims, activations, cost=False, task='Classification', solver="Basic", seed=False):
         self.nodes=nodes
         self.layers=len(nodes)
         self.indims=indims
         activations.append('outact')
         self.activations=activations
         self.task=task.lower()
+        self.t=0
         if not cost and task.lower()=='classification':
             if nodes[-1]==1:
                 self.cost=BCEC
@@ -49,64 +34,64 @@ class NeuralNet:
                 self.cost=SSE
             else:
                 self.cost=FSSE
-        if task.lower() !='regression' and task.lower() !='classification':
+        if self.task !='regression' and self.task !='classification':
             print("Invalid task, use 'Regression' or 'Classification'")
             return None
+        solvers=['momentum','nesterov','nesterovrms','nesterovada','momentumada','momentumrms','rmsprop','adagrad','basic', 'adam']
 
         self.y_classes=np.array([])
-        self.Xmins=np.array([])
-        self.scaleweights=scaleweights
+        self.Xmean=np.array([])
         self.seed=seed
         self.solver=solver.lower()
+        if self.solver not in solvers:
+            print("Possible solvers are " +', '.join(solvers))
+            return None
         self.layer_classes=[]
         nodes=[indims]+nodes
         for i in range(self.layers-1):
-            self.layer_classes.append(activ_functs[activations[i].lower()](nodes[i+1],nodes[i],solver=self.solver,
-                                        scaleweights=self.scaleweights,seed=self.seed))
+            self.layer_classes.append(activ_functs[activations[i].lower()](nodes[i+1],nodes[i],solver=self.solver,seed=self.seed))
 
         self.layer_classes.append(activ_functs[activations[self.layers-1]](nodes[self.layers],nodes[self.layers-1],solver=self.solver,
-                                    scaleweights=self.scaleweights,seed=self.seed, task=self.task))
+                                    seed=self.seed, task=self.task))
 
+    def forward(self, X, p, normalize=True):
 
-    def get_one_hot(self,targets):
-        targets=np.asarray(targets).reshape(-1)
-        num_classes=len(np.unique(targets))
-        indices=np.searchsorted(np.unique(targets),targets)
-        res = np.eye(num_classes)[indices]
-        return res.reshape(len(targets),num_classes)
+        if not self.dropout:
+            self.predict(X,False)
+        else:
+            if not self.Xmean.size:
+                return("Please train before predicting." )
 
-    def mat_ohe(self,data, cols_to_ohe):
-        ohe_cols=np.apply_along_axis(self.get_one_hot,0,data[:,cols_to_ohe])[:,:,0]
-        data=np.hstack((data,ohe_cols))
-        data=np.delete(data,cols_to_ohe,1)
-        return data.astype(float)
+            elif normalize:
+                X=norm(X,self.Xmean,self.Xstd)
+            A=X
+            if 'nesterov' in self.solver:
+                for i in range(self.layers):
+                    A=self.layer_classes[i].nesterov_forwardprop_dropout(A,self.mu,p[i])
+            else:
+                for i in range(self.layers):
+                    A=self.layer_classes[i].forwardprop_dropout(A,p[i])
 
-    def norm(self,X,Xmin,Xmax):
-        return (X-Xmin)/(Xmax-Xmin)
-
-    def unnorm(self,X,Xmin,Xmax):
-        return (X)*(Xmax-Xmin)+Xmin
-
+            if self.task=='classification':
+                self.probabilities=A
+            else:
+                self.normpredictions=A
 
     def predict(self, X, normalize=True):
-
-        if not self.Xmins.size:
-            self.Xmaxes=X.max(0)
-            self.Xmins=X.min(0)
-            X=self.norm(X,self.Xmins,self.Xmaxes)
+        if not self.Xmean.size:
+            return("Please train before predicting." )
 
         elif normalize:
-            X=self.norm(X,self.Xmins,self.Xmaxes)
-
+            X=norm(X,self.Xmean,self.Xstd)
         A=X
-        for i in range(self.layers):
-            if self.solver=='nesterov':
+        if 'nesterov' in self.solver:
+            for i in range(self.layers):
                 A=self.layer_classes[i].nesterov_forwardprop(A,self.mu)
-            else:
+        else:
+            for i in range(self.layers):
                 A=self.layer_classes[i].forwardprop(A)
 
         if self.task=='classification':
-            #Convert to array in case a matrix was passed
             self.probabilities=A
             self.ohe_predictions=np.eye(self.probabilities.shape[1])[np.argmax(self.probabilities, axis=1)]
 
@@ -122,59 +107,83 @@ class NeuralNet:
 
         else:
             self.normpredictions=A
-            self.predictions=self.unnorm(self.normpredictions,self.ymins,self.ymaxes)
+            self.predictions=unnorm(self.normpredictions,self.ymean,self.ystd)
+
 
     def weight_initialization(self):
+        self.t=0
         for i in range(self.layers-1,-1,-1):
-            self.layer_classes[i].weightinit()
+            self.layer_classes[i].weightinit(self.seed)
 
     def weight_update(self,eta,y):
         D=y
         if self.solver=='nesterov':
             for i in range(self.layers-1,-1,-1):
-                D=self.layer_classes[i].nesterov_backprop(eta,self.mu,D)
+                D=self.layer_classes[i].nesterov_backprop(eta,self.mu,D,self.lam1,self.lam2)
 
         elif self.solver=='basic':
             for i in range(self.layers-1,-1,-1):
-                D=self.layer_classes[i].backprop(eta,D)
+                D=self.layer_classes[i].backprop(eta,D,self.lam1,self.lam2)
 
         elif self.solver=='momentum':
             for i in range(self.layers-1,-1,-1):
-                D=self.layer_classes[i].momentum_backprop(eta,self.mu,D)
+                D=self.layer_classes[i].momentum_backprop(eta,self.mu,D,self.lam1,self.lam2)
 
         elif self.solver=='adagrad':
             for i in range(self.layers-1,-1,-1):
-                D=self.layer_classes[i].ada_backprop(eta,D)
+                D=self.layer_classes[i].ada_backprop(eta,D,self.nesterov,self.lam1,self.lam2)
 
         elif self.solver=='rmsprop':
             for i in range(self.layers-1,-1,-1):
-                D=self.layer_classes[i].RMS_prop(eta,self.gamma,D)
+                D=self.layer_classes[i].RMS_prop(eta,self.gamma,D,self.nesterov,self.lam1,self.lam2)
 
         elif self.solver=='adam':
             for i in range(self.layers-1,-1,-1):
-                D=self.layer_classes[i].adamoptimizer(eta,self.mu,self.gamma,self.t,D)
+                D=self.layer_classes[i].adamoptimizer(eta,self.mu,self.gamma,self.t,D,self.lam1,self.lam2)
 
-    def train(self,X,y,epochs,eta,mu=0.1,gamma=.9,batch_size=0,error_calc=True,reinitialize=False,
-                X_val=np.array([]),y_val=np.array([])):
+        elif self.solver=='momentumrms':
+            for i in range(self.layers-1,-1,-1):
+                D=self.layer_classes[i].momentum_RMS_prop(eta,self.mu,self.gamma,D,self.lam1,self.lam2)
+
+        elif self.solver=='momentumada':
+            for i in range(self.layers-1,-1,-1):
+                D=self.layer_classes[i].momentum_ada_backprop(eta,self.mu,D,self.lam1,self.lam2)
+
+        elif self.solver=='nesterovrms':
+            for i in range(self.layers-1,-1,-1):
+                D=self.layer_classes[i].nesterov_RMS_prop(eta,self.mu,D,self.lam1,self.lam2)
+
+        elif self.solver=='nesterovada':
+            for i in range(self.layers-1,-1,-1):
+                D=self.layer_classes[i].nesterov_ada_backprop(eta,self.mu,D,self.lam1,self.lam2)
+
+    def train(self,X,y,epochs,eta,mu=0.1,gamma=.9,lam1=0,lam2=0,decay=False,batch_size=0,error_calc=True,reinitialize=False,dropout=False,
+                p=[],X_val=np.array([]),y_val=np.array([])):
         if reinitialize:
             self.weight_initialization()
         if batch_size==0:
             batch_size=X.shape[0]
         self.valerror=[]
         self.error=[]
-        self.Xmaxes=X.max(0)
-        self.Xmins=X.min(0)
+        self.Xmean=X.mean(0)
+        self.Xstd=X.std(0)
         self.gamma=gamma
         self.mu=mu
-        X=self.norm(X,self.Xmins,self.Xmaxes)
+        self.nesterov=False
+        self.lam1=lam1
+        self.lam2=lam2
+        if len(p)==1:
+            p=p*(self.layers)
+        self.dropout=dropout
+        X=norm(X,self.Xmean,self.Xstd)
 
         if X_val.size:
-            X_val=self.norm(X_val,self.Xmins,self.Xmaxes)
+            X_val=norm(X_val,self.Xmean,self.Xstd)
         if (self.task=="classification" and y.shape[1]<self.nodes[-1]):
             self.y_classes=np.unique(y)
-            y=self.mat_ohe(y,[0])
+            y=mat_ohe(y,[0])
             if y_val.size:
-                y_val=self.mat_ohe(y_val,[0])
+                y_val=mat_ohe(y_val,[0])
 
         elif (self.task=="classification" and y.shape[1]==self.nodes[-1]):
             self.positive_class=np.unique(y)[1]
@@ -184,44 +193,68 @@ class NeuralNet:
                 y_val=np.where(y_val==self.positive_class,1,0)
 
         elif self.task=="regression":
-            self.ymaxes=y.max(0)
-            self.ymins=y.min(0)
-            y=self.norm(y,self.ymins,self.ymaxes)
+            self.ymean=y.mean(0)
+            self.ystd=y.std(0)
+            y=norm(y,self.ymean,self.ystd)
 
             if y_val.size:
-                y_val=self.norm(y_val,self.ymins,self.ymaxes)
+                y_val=norm(y_val,self.ymean,self.ystd)
 
         batches=np.ceil(X.shape[0]/batch_size).astype(int)
-        train=np.hstack((X,y))
-        np.random.shuffle(train)
-        train=np.array_split(train,batches)
-        self.t=0
         for i in range(epochs):
+            train=np.hstack((X,y))
+            np.random.shuffle(train)
+            train=np.array_split(train,batches)
             for a in train:
-                X=np.array(a[:,:-self.nodes[-1]])
-                y=np.array(a[:,-self.nodes[-1]:])
-                self.predict(X,False)
-                self.weight_update(eta,y)
+                X_temp=np.array(a[:,:-self.nodes[-1]])
+                y_temp=np.array(a[:,-self.nodes[-1]:])
+
+                if self.solver == 'nesterovada':
+                    self.solver ='adagrad'
+                    self.nesterov=True
+                    self.forward(X_temp,p,False)
+                    self.weight_update(eta,y_temp)
+                    self.solver='nesterovada'
+                    self.forward(X_temp,p,False)
+                    self.weight_update(eta,y_temp)
+                elif self.solver == 'nesterovrms':
+                    self.solver ='rmsprop'
+                    self.nesterov=True
+                    self.forward(X_temp,p,False)
+                    self.weight_update(eta,y_temp)
+                    self.solver='nesterovrms'
+                    self.forward(X_temp,p,False)
+                    self.weight_update(eta,y_temp)
+                else:
+                    self.forward(X_temp,p,False)
+                    self.weight_update(eta,y_temp)
 
                 if error_calc and self.task=='classification':
-                    self.predict(X,False)
-                    self.error.append(self.cost(y,self.probabilities))
+                    self.forward(X_temp,p,False)
+                    self.error.append(self.cost(y_temp,self.probabilities))
 
                 elif error_calc:
-                    self.predict(X,False)
-                    self.error.append(self.cost(y,self.normpredictions))
+                    self.forward(X_temp,p,False)
+                    self.error.append(self.cost(y_temp,self.normpredictions))
                 self.t += 1
 
+                if decay=="Scheduled":
+                    eta=eta*k**(i/T)
+                elif decay=="Inverse":
+                    eta=eta/(k*i+1)
+                elif decay=="Exponential":
+                    eta=eta*np.exp(-k*i)
+
+                if self.task=='classification':
+                    self.predict(X,False)
+                    if self.nodes[-1]>1:
+                        acc=(self.ohe_predictions==y).mean()
+
+                    elif self.nodes[-1]==1:
+                        acc=(self.bin_predictions==y).mean()
+                    if acc==1.0:
+                        return acc
             if self.task=='classification':
-                if self.nodes[-1]>1:
-                    acc=(self.ohe_predictions==y).mean()
-
-                elif self.nodes[-1]==1:
-                    acc=(self.bin_predictions==y).mean()
-
-                if acc== 1.0:
-                    break
-
                 if y_val.size:
                     self.predict(X_val,False)
                     self.valerror.append(self.cost(y_val,self.probabilities))
