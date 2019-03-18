@@ -5,6 +5,10 @@ from .prelu_layer import pReLU
 from .leakyrelu_layer import LeakyReLU
 from .sigmoid_layer import Sigmoid
 from .out_layer import outactivation
+from .conv_layer import convolution
+from .SPP_layer import SPP
+from .max_pool_layer import maxpool
+from .flatten_layer import flatten
 from TSML.TSPreprocessandCost import *
 
 activ_functs={}
@@ -14,9 +18,13 @@ activ_functs['prelu']=pReLU
 activ_functs['leakyrelu']=LeakyReLU
 activ_functs['sigmoid']=Sigmoid
 activ_functs['outact']=outactivation
+activ_functs['conv']=convolution
+activ_functs['spp']=SPP
+activ_functs['maxpool']=maxpool
+activ_functs['flatten']=flatten
 
 class NeuralNet:
-    def __init__(self, nodes, indims, activations, cost=False, task='Classification', solver="Basic", seed=False):
+    def __init__(self, nodes, indims, activations, filtersize=[], cost=False, task='Classification', solver="Basic", seed=False):
         self.nodes=nodes
         self.layers=len(nodes)
         self.indims=indims
@@ -48,9 +56,14 @@ class NeuralNet:
             return None
         self.layer_classes=[]
         nodes=[indims]+nodes
+        f=0
         for i in range(self.layers-1):
-            self.layer_classes.append(activ_functs[activations[i].lower()](nodes[i+1],nodes[i],solver=self.solver,seed=self.seed))
-
+            if activations[i].lower()=='conv':
+                self.layer_classes.append(activ_functs[activations[i].lower()](nodes[i+1],filtersize[f],nodes[i],solver=self.solver,seed=self.seed))
+                f+=1
+            else:
+                self.layer_classes.append(activ_functs[activations[i].lower()](nodes[i+1],nodes[i],solver=self.solver,seed=self.seed))
+                
         self.layer_classes.append(activ_functs[activations[self.layers-1]](nodes[self.layers],nodes[self.layers-1],solver=self.solver,
                                     seed=self.seed, task=self.task))
 
@@ -93,21 +106,23 @@ class NeuralNet:
 
         if self.task=='classification':
             self.probabilities=A
-            self.ohe_predictions=np.eye(self.probabilities.shape[1])[np.argmax(self.probabilities, axis=1)]
-
-            if self.nodes[-1]>1 and self.y_classes.size:
-                 self.predictions=self.y_classes[np.argmax(self.probabilities, axis=1)].reshape(-1,1)
-
-            elif self.nodes[-1]>1:
-                self.predictions=self.ohe_predictions
-
-            else:
-                self.bin_predictions=np.rint(self.probabilities)
-                self.predictions=np.where(self.bin_predictions==1,self.positive_class,self.negative_class).reshape(-1,1)
+            if self.convolutional==False:
+                self.ohe_predictions=np.eye(self.probabilities.shape[1])[np.argmax(self.probabilities, axis=1)]
+    
+                if self.nodes[-1]>1 and self.y_classes.size:
+                     self.predictions=self.y_classes[np.argmax(self.probabilities, axis=1)].reshape(-1,1)
+    
+                elif self.nodes[-1]>1:
+                    self.predictions=self.ohe_predictions
+    
+                else:
+                    self.bin_predictions=np.rint(self.probabilities)
+                    self.predictions=np.where(self.bin_predictions==1,self.positive_class,self.negative_class).reshape(-1,1)
 
         else:
             self.normpredictions=A
-            self.predictions=unnorm(self.normpredictions,self.ymean,self.ystd)
+            if convolutional==False:   
+                self.predictions=unnorm(self.normpredictions,self.ymean,self.ystd)
 
 
     def weight_initialization(self):
@@ -157,8 +172,8 @@ class NeuralNet:
             for i in range(self.layers-1,-1,-1):
                 D=self.layer_classes[i].nesterov_ada_backprop(eta,self.mu,D,self.lam1,self.lam2)
 
-    def train(self,X,y,epochs,eta,mu=0.1,gamma=.9,lam1=0,lam2=0,decay=False,batch_size=0,error_calc=True,reinitialize=False,dropout=False,
-                p=[],X_val=np.array([]),y_val=np.array([])):
+    def train(self,X,y,epochs,eta,mu=0.1,gamma=.9,lam1=0,lam2=0,decay=False,k=0,T=1,batch_size=0,error_calc=True,reinitialize=False,dropout=False,
+                p=[],X_val=np.array([]),y_val=np.array([]), convolutional=False):
         if reinitialize:
             self.weight_initialization()
         if batch_size==0:
@@ -172,42 +187,52 @@ class NeuralNet:
         self.nesterov=False
         self.lam1=lam1
         self.lam2=lam2
+        self.convolutional=convolutional
+        eta0=eta
         if len(p)==1:
             p=p*(self.layers)
         self.dropout=dropout
-        X=norm(X,self.Xmean,self.Xstd)
-
-        if X_val.size:
-            X_val=norm(X_val,self.Xmean,self.Xstd)
-        if (self.task=="classification" and y.shape[1]<self.nodes[-1]):
-            self.y_classes=np.unique(y)
-            y=mat_ohe(y,[0])
-            if y_val.size:
-                y_val=mat_ohe(y_val,[0])
-
-        elif (self.task=="classification" and y.shape[1]==self.nodes[-1]):
-            self.positive_class=np.unique(y)[1]
-            self.negative_class=np.unique(y)[0]
-            y=np.where(y==self.positive_class,1,0)
-            if y_val.size:
-                y_val=np.where(y_val==self.positive_class,1,0)
-
-        elif self.task=="regression":
-            self.ymean=y.mean(0)
-            self.ystd=y.std(0)
-            y=norm(y,self.ymean,self.ystd)
-
-            if y_val.size:
-                y_val=norm(y_val,self.ymean,self.ystd)
+        if convolutional==False:
+            X=norm(X,self.Xmean,self.Xstd)
+    
+            if X_val.size:
+                X_val=norm(X_val,self.Xmean,self.Xstd)
+            if (self.task=="classification" and y.shape[1]<self.nodes[-1]):
+                self.y_classes=np.unique(y)
+                y=mat_ohe(y,[0])
+                if y_val.size:
+                    y_val=mat_ohe(y_val,[0])
+    
+            elif (self.task=="classification" and y.shape[1]==self.nodes[-1]):
+                self.positive_class=np.unique(y)[1]
+                self.negative_class=np.unique(y)[0]
+                y=np.where(y==self.positive_class,1,0)
+                if y_val.size:
+                    y_val=np.where(y_val==self.positive_class,1,0)
+    
+            elif self.task=="regression":
+                self.ymean=y.mean(0)
+                self.ystd=y.std(0)
+                y=norm(y,self.ymean,self.ystd)
+    
+                if y_val.size:
+                    y_val=norm(y_val,self.ymean,self.ystd)
 
         batches=np.ceil(X.shape[0]/batch_size).astype(int)
         for i in range(epochs):
-            train=np.hstack((X,y))
-            np.random.shuffle(train)
-            train=np.array_split(train,batches)
+            if convolutional==False:
+                train=np.hstack((X,y))
+                np.random.shuffle(train)
+                train=np.array_split(train,batches)
+            else:
+                train=[0]
             for a in train:
-                X_temp=np.array(a[:,:-self.nodes[-1]])
-                y_temp=np.array(a[:,-self.nodes[-1]:])
+                if convolutional==False:
+                    X_temp=np.array(a[:,:-self.nodes[-1]])
+                    y_temp=np.array(a[:,-self.nodes[-1]:])
+                else:
+                    X_temp=X
+                    y_temp=y
 
                 if self.solver == 'nesterovada':
                     self.solver ='adagrad'
@@ -239,21 +264,22 @@ class NeuralNet:
                 self.t += 1
 
                 if decay=="Scheduled":
-                    eta=eta*k**(i/T)
+                    eta=eta0*k**(self.t/T)
                 elif decay=="Inverse":
-                    eta=eta/(k*i+1)
+                    eta=eta0/(k*self.t+1)
                 elif decay=="Exponential":
-                    eta=eta*np.exp(-k*i)
+                    eta=eta0*np.exp(-k*self.t)
 
-                if self.task=='classification':
-                    self.predict(X,False)
-                    if self.nodes[-1]>1:
-                        acc=(self.ohe_predictions==y).mean()
-
-                    elif self.nodes[-1]==1:
-                        acc=(self.bin_predictions==y).mean()
-                    if acc==1.0:
-                        return acc
+                if convolutional==False:
+                    if self.task=='classification':
+                        self.predict(X,False)
+                        if self.nodes[-1]>1:
+                            acc=(self.ohe_predictions==y).mean()
+    
+                        elif self.nodes[-1]==1:
+                            acc=(self.bin_predictions==y).mean()
+                        if acc==1.0:
+                            return acc
             if self.task=='classification':
                 if y_val.size:
                     self.predict(X_val,False)
